@@ -1,5 +1,7 @@
 # Multi-stage Dockerfile for Vite React app
-FROM node:18-alpine AS build
+# Use Node 20 (>=20.19) because Vite requires Node >=20.19 or 22.12+
+# node:20.20-alpine is pinned to a compatible Node.js minor version.
+FROM node:20.20-alpine AS build
 WORKDIR /app
 
 # Install deps
