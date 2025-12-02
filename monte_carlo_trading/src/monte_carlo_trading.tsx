@@ -1,32 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import type { SimulationResult, Params as WorkerParams, WorkerRequest, WorkerResponse, FinalsResponse, PathsResponse } from './simulationWorker';
 
-type Params = {
-  initialCapital: number;
-  riskPercentage: number; // percent
-  riskRewardRatio: number;
-  winRate: number; // percent
-  tradesPerMonth: number;
-  timeMonths: number;
-  simulations: number;
-  riskCapDollars: number;
-};
+// Vite-friendly worker loader
+const createSimulationWorker = () => new Worker(new URL('./simulationWorker.ts', import.meta.url), { type: 'module' });
 
-type MonthlyPoint = { month: number; capital: number };
-
-type SimulationResult = { finalCapital: number; monthlyData: MonthlyPoint[] };
-
-const labels = ['Worst Sim', '25th %ile', 'Median', '75th %ile', 'Best Sim'] as const;
-
-type ChartPoint = {
-  month: number;
-  'Worst Sim'?: number;
-  '25th %ile'?: number;
-  'Median'?: number;
-  '75th %ile'?: number;
-  'Best Sim'?: number;
-};
-
+// Local types
 type Results = {
   mean: number;
   median: number;
@@ -38,16 +17,27 @@ type Results = {
   best: number;
   allWinsCapital: number;
   allLossesCapital: number;
-  chartData: ChartPoint[];
+  chartData: Array<{
+    month: number;
+    'Worst Sim'?: number;
+    '25th %ile'?: number;
+    'Median'?: number;
+    '75th %ile'?: number;
+    'Best Sim'?: number;
+  }>;
   totalTrades: number;
 };
+
+type ComponentParams = WorkerParams & { simulations: number };
 
 const MonteCarloTrading: React.FC = () => {
   const [results, setResults] = useState<Results | null>(null);
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [showInputs, setShowInputs] = useState<boolean>(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
 
-  const [params, setParams] = useState<Params>({
+  const [params, setParams] = useState<ComponentParams>({
     initialCapital: 50000,
     riskPercentage: 1,
     riskRewardRatio: 3,
@@ -58,140 +48,265 @@ const MonteCarloTrading: React.FC = () => {
     riskCapDollars: 3000
   });
 
-  const handleInputChange = (field: keyof Params, value: string) => {
+  const handleInputChange = (field: keyof ComponentParams, value: string) => {
     setParams(prev => ({
       ...prev,
-      [field]: (Number(value) || 0) as unknown as Params[keyof Params]
+      [field]: (Number(value) || 0) as unknown as ComponentParams[keyof ComponentParams]
     }));
   };
 
+  const pendingWorkers = useRef<Worker[]>([]);
+
   const runSimulation = () => {
     setIsRunning(true);
+    setErrorMsg(null);
+    setProgress({ done: 0, total: 0 });
+    // Use a small bounded worker pool + batching to avoid huge allocations/OOM.
+    const hw = (navigator as any).hardwareConcurrency ?? 4;
+    const maxWorkers = Math.min(Math.max(1, hw), 8); // cap worker pool to at most 8
+    const batchSize = 20000; // max sims per worker batch (tuneable)
 
-    setTimeout(() => {
-      const winRateDecimal: number = params.winRate / 100;
-      const riskPercentDecimal: number = params.riskPercentage / 100;
-      const totalTrades: number = params.tradesPerMonth * params.timeMonths;
-      const simResults: SimulationResult[] = [];
+    // Streaming stats to limit memory: track sum/min/max and a reservoir sample for percentiles
+    const totalSims = params.simulations;
+    const sampleSize = Math.min(20000, totalSims); // adjustable
+    const reservoir: number[] = [];
+    let seen = 0; // total finals seen
+    let sum = 0;
+    let minVal = Number.POSITIVE_INFINITY;
+    let maxVal = Number.NEGATIVE_INFINITY;
 
-      for (let sim = 0; sim < params.simulations; sim++) {
-        let capital: number = params.initialCapital;
-        const monthlyData: MonthlyPoint[] = [{ month: 0, capital }];
-        let currentRiskPerTrade: number = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
-        let currentRewardPerTrade: number = currentRiskPerTrade * params.riskRewardRatio;
-        for (let month = 1; month <= params.timeMonths; month++) {
-          for (let trade = 0; trade < params.tradesPerMonth; trade++) {
-            const isWin = Math.random() < winRateDecimal;
+    // compute number of batches and progress as batches completed
+    const totalBatches = Math.ceil(totalSims / batchSize);
+    setProgress({ done: 0, total: totalBatches });
 
-            if (isWin) {
-              capital += currentRewardPerTrade;
+    // atomic-ish pointer for next batch (main thread only)
+    let nextStart = 0;
+
+    // helper to request the next batch size
+    const getNextBatch = () => {
+      if (nextStart >= totalSims) return 0;
+      const remaining = totalSims - nextStart;
+      const take = Math.min(batchSize, remaining);
+      nextStart += take;
+      return take;
+    };
+
+    let completedBatches = 0;
+
+    // spawn a pool of workers and have each reuse to process sequential batches
+    const poolSize = Math.min(maxWorkers, totalBatches);
+    pendingWorkers.current = [];
+
+    const workerPromises: Promise<void>[] = [];
+
+    for (let i = 0; i < poolSize; i++) {
+      const w = createSimulationWorker();
+      pendingWorkers.current.push(w);
+
+      const p = new Promise<void>((resolve) => {
+        const onMessage = (ev: MessageEvent<WorkerResponse>) => {
+          const data = ev.data as FinalsResponse;
+          if (!data || (data as any).kind !== 'finals' || !(data as any).finals) {
+            console.error('Unexpected worker response', ev.data);
+            setErrorMsg('Unexpected worker response received.');
+            // terminate this worker and resolve (will reduce pool)
+            w.removeEventListener('message', onMessage as any);
+            w.terminate();
+            resolve();
+            return;
+          }
+
+          const finals = data.finals; // Float64Array
+          // Update streaming stats and reservoir sample
+          for (let k = 0; k < finals.length; k++) {
+            const v = finals[k];
+            sum += v;
+            seen += 1;
+            if (v < minVal) minVal = v;
+            if (v > maxVal) maxVal = v;
+            if (reservoir.length < sampleSize) {
+              reservoir.push(v);
             } else {
-              capital -= currentRiskPerTrade;
+              const j = Math.floor(Math.random() * seen);
+              if (j < sampleSize) reservoir[j] = v;
             }
-
-            if (capital < 0) capital = 0;
           }
 
-          // Reassess risk quarterly
-          if (month % 3 === 0) {
-            currentRiskPerTrade = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
-            currentRewardPerTrade = currentRiskPerTrade * params.riskRewardRatio;
+          completedBatches += 1;
+          setProgress(prev => ({ ...prev, done: Math.min(prev.done + 1, prev.total) }));
+
+          // ask this worker to process another batch if available
+          const nextSims = getNextBatch();
+          if (nextSims > 0) {
+            const wp: WorkerParams = {
+              initialCapital: params.initialCapital,
+              riskPercentage: params.riskPercentage,
+              riskRewardRatio: params.riskRewardRatio,
+              winRate: params.winRate,
+              tradesPerMonth: params.tradesPerMonth,
+              timeMonths: params.timeMonths,
+              riskCapDollars: params.riskCapDollars,
+            };
+            const req: WorkerRequest = { kind: 'finals', params: wp, simulations: nextSims };
+            w.postMessage(req);
+            return; // continue listening
           }
 
-          monthlyData.push({ month, capital });
+          // no more batches for this worker: cleanup and resolve
+          w.removeEventListener('message', onMessage as any);
+          w.terminate();
+          resolve();
+        };
+
+        w.addEventListener('message', onMessage as any);
+        w.onerror = (err) => {
+          console.error('Worker error', err);
+          w.removeEventListener('message', onMessage as any);
+          try { w.terminate(); } catch {}
+          setErrorMsg('A worker encountered an error. Try lowering the number of simulations or batch size.');
+          resolve();
+        };
+
+        // kick off first batch for this worker
+        const firstSims = getNextBatch();
+        if (firstSims > 0) {
+          const wp: WorkerParams = {
+            initialCapital: params.initialCapital,
+            riskPercentage: params.riskPercentage,
+            riskRewardRatio: params.riskRewardRatio,
+            winRate: params.winRate,
+            tradesPerMonth: params.tradesPerMonth,
+            timeMonths: params.timeMonths,
+            riskCapDollars: params.riskCapDollars,
+          };
+          const req: WorkerRequest = { kind: 'finals', params: wp, simulations: firstSims };
+          w.postMessage(req);
+        } else {
+          // nothing to do
+          w.removeEventListener('message', onMessage as any);
+          w.terminate();
+          resolve();
         }
+      });
 
-        simResults.push({ finalCapital: capital, monthlyData });
-      }
+      workerPromises.push(p);
+    }
 
-      // Sort results and compute statistics
-      simResults.sort((a, b) => a.finalCapital - b.finalCapital);
-      const finalCapitals = simResults.map(r => r.finalCapital);
-      const mean = finalCapitals.reduce((a, b) => a + b, 0) / params.simulations;
-      const median = finalCapitals[Math.floor(params.simulations / 2)];
-      const percentile25 = finalCapitals[Math.floor(params.simulations * 0.25)];
-      const percentile75 = finalCapitals[Math.floor(params.simulations * 0.75)];
-      const percentile10 = finalCapitals[Math.floor(params.simulations * 0.10)];
-      const percentile90 = finalCapitals[Math.floor(params.simulations * 0.90)];
-      const worst = finalCapitals[0];
-      const best = finalCapitals[params.simulations - 1];
+    // When all workers finish batches, compute summary
+    Promise.all(workerPromises).then(() => {
+      // Compute summary from streaming stats and reservoir sample
+      const mean = seen > 0 ? sum / seen : 0;
+      reservoir.sort((a, b) => a - b);
+      const pick = (p: number) => reservoir[Math.floor(reservoir.length * p)] ?? 0;
+      const summary = {
+        mean,
+        median: pick(0.5),
+        percentile25: pick(0.25),
+        percentile75: pick(0.75),
+        percentile10: pick(0.10),
+        percentile90: pick(0.90),
+        worst: minVal === Number.POSITIVE_INFINITY ? 0 : minVal,
+        best: maxVal === Number.NEGATIVE_INFINITY ? 0 : maxVal,
+        allWinsCapital: 0, // filled below
+        allLossesCapital: 0, // filled below
+        chartData: [],
+        totalTrades: params.tradesPerMonth * params.timeMonths,
+      } as Results;
 
-      // Best case (all wins) - compounding
+      // Compute extremes (all wins/losses)
+      const riskPercentDecimal = params.riskPercentage / 100;
       let bestCapital = params.initialCapital;
       let bestRisk = Math.min(bestCapital * riskPercentDecimal, params.riskCapDollars);
       let bestReward = bestRisk * params.riskRewardRatio;
-
       for (let month = 1; month <= params.timeMonths; month++) {
         for (let trade = 0; trade < params.tradesPerMonth; trade++) {
           bestCapital += bestReward;
         }
-
         if (month % 3 === 0) {
           bestRisk = Math.min(bestCapital * riskPercentDecimal, params.riskCapDollars);
           bestReward = bestRisk * params.riskRewardRatio;
         }
       }
-
-      // Worst case (all losses) - compounding
-      let worstCapital = params.initialCapital;
-      let worstRisk = Math.min(worstCapital * riskPercentDecimal, params.riskCapDollars);
-
+      let worstCapitalCalc = params.initialCapital;
+      let worstRisk = Math.min(worstCapitalCalc * riskPercentDecimal, params.riskCapDollars);
       for (let month = 1; month <= params.timeMonths; month++) {
         for (let trade = 0; trade < params.tradesPerMonth; trade++) {
-          worstCapital -= worstRisk;
-          if (worstCapital < 0) worstCapital = 0;
+          worstCapitalCalc -= worstRisk;
+          if (worstCapitalCalc < 0) worstCapitalCalc = 0;
         }
-
-        if (month % 3 === 0 && worstCapital > 0) {
-          worstRisk = Math.min(worstCapital * riskPercentDecimal, params.riskCapDollars);
+        if (month % 3 === 0 && worstCapitalCalc > 0) {
+          worstRisk = Math.min(worstCapitalCalc * riskPercentDecimal, params.riskCapDollars);
         }
       }
+      summary.allWinsCapital = bestCapital;
+      summary.allLossesCapital = worstCapitalCalc;
 
-      const allWinsCapital = bestCapital;
-      const allLossesCapital = worstCapital;
-
-      // Prepare chart data
-      const sampleIndices = [
-        0,
-        Math.floor(params.simulations * 0.25),
-        Math.floor(params.simulations * 0.5),
-        Math.floor(params.simulations * 0.75),
-        params.simulations - 1
-      ];
-
-      const chartData: ChartPoint[] = [];
-      for (let month = 0; month <= params.timeMonths; month++) {
-        const dataPoint: ChartPoint = { month };
-        sampleIndices.forEach((idx, i) => {
-          const label = labels[i];
-          const point = simResults[idx].monthlyData[month];
-          dataPoint[label] = point ? point.capital : 0;
-        });
-        chartData.push(dataPoint);
-      }
-
-      setResults({
-        mean,
-        median,
-        percentile25,
-        percentile75,
-        percentile10,
-        percentile90,
-        worst,
-        best,
-        allWinsCapital,
-        allLossesCapital,
-        chartData,
-        totalTrades
+      // fetch chart path samples
+      fetchChartPaths(params).then(chartData => {
+        summary.chartData = chartData;
+        setResults(summary);
+        setIsRunning(false);
+        pendingWorkers.current = [];
+      }).catch(err => {
+        console.error(err);
+        setErrorMsg('Failed to compute chart paths.');
+        setIsRunning(false);
       });
-
+    }).catch(err => {
+      console.error('Error waiting for worker pool', err);
+      setErrorMsg('Worker pool failed. Try lowering simulations or batch size.');
       setIsRunning(false);
-    }, 100);
+      pendingWorkers.current.forEach(w => { try { w.terminate(); } catch {} });
+      pendingWorkers.current = [];
+    });
+  };
+  // (removed old merge and compute helpers to avoid large-array allocations)
+
+  // Fetch chart paths from a small paths worker job
+  const fetchChartPaths = (params: ComponentParams) => {
+    return new Promise<Results['chartData']>((resolve) => {
+      const w = createSimulationWorker();
+      const wp: WorkerParams = {
+        initialCapital: params.initialCapital,
+        riskPercentage: params.riskPercentage,
+        riskRewardRatio: params.riskRewardRatio,
+        winRate: params.winRate,
+        tradesPerMonth: params.tradesPerMonth,
+        timeMonths: params.timeMonths,
+        riskCapDollars: params.riskCapDollars,
+      };
+      // Use a smaller count for paths to minimize cost
+      const sims = Math.min(1000, params.simulations);
+      w.onmessage = (ev: MessageEvent<PathsResponse>) => {
+        const paths = ev.data.paths;
+        const labels = ['Worst Sim', '25th %ile', 'Median', '75th %ile', 'Best Sim'] as const;
+        const chartData: Results['chartData'] = [];
+        for (let month = 0; month <= params.timeMonths; month++) {
+          const point: any = { month };
+          paths.forEach((p, i) => {
+            const label = labels[i];
+            point[label] = p.monthlyData[month]?.capital ?? 0;
+          });
+          chartData.push(point);
+        }
+        w.terminate();
+        resolve(chartData);
+      };
+      const req: WorkerRequest = { kind: 'paths', params: wp, simulations: sims };
+      w.postMessage(req);
+    });
   };
 
   useEffect(() => {
     runSimulation();
+    return () => {
+      // Cleanup any running workers on unmount
+      pendingWorkers.current.forEach(w => w.terminate());
+      pendingWorkers.current = [];
+    };
   }, []);
+
+  // (removed unused old helper)
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -362,8 +477,14 @@ const MonteCarloTrading: React.FC = () => {
       </div>
 
       {isRunning ? (
-        <div className="bg-white rounded-lg shadow p-12 text-center">
+        <div className="bg-white rounded-lg shadow p-12 text-center space-y-2">
           <p className="text-xl">Running simulation...</p>
+          <p className="text-sm text-gray-600">Workers: {progress.done}/{progress.total} completed</p>
+        </div>
+      ) : errorMsg ? (
+        <div className="bg-red-50 rounded-lg shadow p-6 text-red-700">
+          <p className="font-semibold">Error</p>
+          <p className="text-sm">{errorMsg}</p>
         </div>
       ) : results ? (
         <>
