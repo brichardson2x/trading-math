@@ -16,6 +16,8 @@ type MonthlyPoint = { month: number; capital: number };
 
 type SimulationResult = { finalCapital: number; monthlyData: MonthlyPoint[] };
 
+const labels = ['Worst Sim', '25th %ile', 'Median', '75th %ile', 'Best Sim'] as const;
+
 type ChartPoint = {
   month: number;
   'Worst Sim'?: number;
@@ -45,74 +47,66 @@ const MonteCarloTrading: React.FC = () => {
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [showInputs, setShowInputs] = useState<boolean>(true);
 
-  // Input parameters as state
   const [params, setParams] = useState<Params>({
     initialCapital: 50000,
-    riskPercentage: 1, // Changed to percentage
-    riskRewardRatio: 3, // Separate RRR field
+    riskPercentage: 1,
+    riskRewardRatio: 3,
     winRate: 30,
     tradesPerMonth: 7,
     timeMonths: 36,
     simulations: 10000,
-    riskCapDollars: 3000 // Cap in dollars
+    riskCapDollars: 3000
   });
 
   const handleInputChange = (field: keyof Params, value: string) => {
     setParams(prev => ({
       ...prev,
-      // coerce to number; if NaN, fall back to 0
       [field]: (Number(value) || 0) as unknown as Params[keyof Params]
     }));
   };
 
   const runSimulation = () => {
     setIsRunning(true);
-    
+
     setTimeout(() => {
-  const winRateDecimal = params.winRate / 100;
-  const riskPercentDecimal = params.riskPercentage / 100;
-  const totalTrades = params.tradesPerMonth * params.timeMonths;
-  const simResults: SimulationResult[] = [];
-      
-      // Run Monte Carlo simulations
+      const winRateDecimal: number = params.winRate / 100;
+      const riskPercentDecimal: number = params.riskPercentage / 100;
+      const totalTrades: number = params.tradesPerMonth * params.timeMonths;
+      const simResults: SimulationResult[] = [];
+
       for (let sim = 0; sim < params.simulations; sim++) {
-        let capital = params.initialCapital;
-        let monthlyData = [{ month: 0, capital: capital }];
-        let currentRiskPerTrade = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
-        let currentRewardPerTrade = currentRiskPerTrade * params.riskRewardRatio;
-        
+        let capital: number = params.initialCapital;
+        const monthlyData: MonthlyPoint[] = [{ month: 0, capital }];
+        let currentRiskPerTrade: number = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
+        let currentRewardPerTrade: number = currentRiskPerTrade * params.riskRewardRatio;
         for (let month = 1; month <= params.timeMonths; month++) {
           for (let trade = 0; trade < params.tradesPerMonth; trade++) {
             const isWin = Math.random() < winRateDecimal;
-            
+
             if (isWin) {
               capital += currentRewardPerTrade;
             } else {
               capital -= currentRiskPerTrade;
             }
-            
-            // Prevent capital from going negative
+
             if (capital < 0) capital = 0;
           }
-          
-          // Quarterly reassessment of risk
+
+          // Reassess risk quarterly
           if (month % 3 === 0) {
-            // Recalculate risk as percentage of current capital, capped
             currentRiskPerTrade = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
             currentRewardPerTrade = currentRiskPerTrade * params.riskRewardRatio;
           }
-          
+
           monthlyData.push({ month, capital });
         }
-        
+
         simResults.push({ finalCapital: capital, monthlyData });
       }
-      
-      // Sort results
+
+      // Sort results and compute statistics
       simResults.sort((a, b) => a.finalCapital - b.finalCapital);
-      
-      // Calculate statistics
-  const finalCapitals = simResults.map(r => r.finalCapital);
+      const finalCapitals = simResults.map(r => r.finalCapital);
       const mean = finalCapitals.reduce((a, b) => a + b, 0) / params.simulations;
       const median = finalCapitals[Math.floor(params.simulations / 2)];
       const percentile25 = finalCapitals[Math.floor(params.simulations * 0.25)];
@@ -121,61 +115,61 @@ const MonteCarloTrading: React.FC = () => {
       const percentile90 = finalCapitals[Math.floor(params.simulations * 0.90)];
       const worst = finalCapitals[0];
       const best = finalCapitals[params.simulations - 1];
-      
-      // Best case (all wins) - with compounding risk
+
+      // Best case (all wins) - compounding
       let bestCapital = params.initialCapital;
       let bestRisk = Math.min(bestCapital * riskPercentDecimal, params.riskCapDollars);
       let bestReward = bestRisk * params.riskRewardRatio;
-      
+
       for (let month = 1; month <= params.timeMonths; month++) {
         for (let trade = 0; trade < params.tradesPerMonth; trade++) {
           bestCapital += bestReward;
         }
-        
+
         if (month % 3 === 0) {
           bestRisk = Math.min(bestCapital * riskPercentDecimal, params.riskCapDollars);
           bestReward = bestRisk * params.riskRewardRatio;
         }
       }
-      
-      // Worst case (all losses) - with compounding risk
+
+      // Worst case (all losses) - compounding
       let worstCapital = params.initialCapital;
       let worstRisk = Math.min(worstCapital * riskPercentDecimal, params.riskCapDollars);
-      
+
       for (let month = 1; month <= params.timeMonths; month++) {
         for (let trade = 0; trade < params.tradesPerMonth; trade++) {
           worstCapital -= worstRisk;
           if (worstCapital < 0) worstCapital = 0;
         }
-        
+
         if (month % 3 === 0 && worstCapital > 0) {
           worstRisk = Math.min(worstCapital * riskPercentDecimal, params.riskCapDollars);
         }
       }
-      
+
       const allWinsCapital = bestCapital;
       const allLossesCapital = worstCapital;
-      
-      // Prepare chart data (sample paths)
+
+      // Prepare chart data
       const sampleIndices = [
-        0, // worst
+        0,
         Math.floor(params.simulations * 0.25),
-        Math.floor(params.simulations * 0.50), // median
+        Math.floor(params.simulations * 0.5),
         Math.floor(params.simulations * 0.75),
-        params.simulations - 1 // best
+        params.simulations - 1
       ];
-      
+
       const chartData: ChartPoint[] = [];
       for (let month = 0; month <= params.timeMonths; month++) {
         const dataPoint: ChartPoint = { month };
         sampleIndices.forEach((idx, i) => {
-          const labels = ['Worst Sim', '25th %ile', 'Median', '75th %ile', 'Best Sim'];
-          // assign capital value to the corresponding label
-          (dataPoint as any)[labels[i]] = simResults[idx].monthlyData[month].capital;
+          const label = labels[i];
+          const point = simResults[idx].monthlyData[month];
+          dataPoint[label] = point ? point.capital : 0;
         });
         chartData.push(dataPoint);
       }
-      
+
       setResults({
         mean,
         median,
@@ -190,7 +184,7 @@ const MonteCarloTrading: React.FC = () => {
         chartData,
         totalTrades
       });
-      
+
       setIsRunning(false);
     }, 100);
   };
@@ -219,27 +213,23 @@ const MonteCarloTrading: React.FC = () => {
   const expectedValuePerTrade = (params.winRate / 100) * initialReward - (1 - params.winRate / 100) * initialRisk;
 
   return (
-    <div className="mc-root container my-5 w-full max-w-6xl mx-auto p-6 bg-gray-50">
-      <div className="mc-header">
-        <h1 className="text-3xl font-bold text-gray-800 mb-0">Monte Carlo Trading Analysis</h1>
-      </div>
-
-      <div className="mc-centered">
+    <div className="w-full max-w-6xl mx-auto p-6 bg-gray-50">
+      <h1 className="text-3xl font-bold text-gray-800 mb-6">Monte Carlo Trading Analysis</h1>
       
       {/* Interactive Input Parameters */}
-  <div className="bg-white rounded-lg shadow p-6 mb-6 card mc-panel">
+      <div className="bg-white rounded-lg shadow p-6 mb-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold">Input Parameters</h2>
           <button
             onClick={() => setShowInputs(!showInputs)}
-            className="text-blue-600 hover:text-blue-800 font-medium btn btn-link p-0"
+            className="text-blue-600 hover:text-blue-800 font-medium"
           >
             {showInputs ? 'Hide' : 'Show'} Inputs
           </button>
         </div>
         
         {showInputs && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4 mc-controls">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Initial Portfolio ($)
@@ -350,11 +340,11 @@ const MonteCarloTrading: React.FC = () => {
           </div>
         )}
         
-  <div className="d-flex flex-wrap gap-4 align-items-center">
+        <div className="flex flex-wrap gap-4 items-center">
           <button
             onClick={runSimulation}
             disabled={isRunning}
-            className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium transition-colors btn btn-primary"
+            className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium transition-colors"
           >
             {isRunning ? 'Running...' : 'Run Simulation'}
           </button>
@@ -371,8 +361,6 @@ const MonteCarloTrading: React.FC = () => {
         </div>
       </div>
 
-      </div>
-
       {isRunning ? (
         <div className="bg-white rounded-lg shadow p-12 text-center">
           <p className="text-xl">Running simulation...</p>
@@ -380,7 +368,7 @@ const MonteCarloTrading: React.FC = () => {
       ) : results ? (
         <>
           {/* Theoretical Extremes */}
-          <div className="bg-white rounded-lg shadow p-6 mb-6 card mc-card">
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Theoretical Extremes</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="border-l-4 border-green-500 pl-4">
@@ -397,9 +385,9 @@ const MonteCarloTrading: React.FC = () => {
           </div>
 
           {/* Monte Carlo Results */}
-          <div className="bg-white rounded-lg shadow p-6 mb-6 card">
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Monte Carlo Results ({params.simulations.toLocaleString()} Simulations)</h2>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mc-stats-grid">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
               <div className="bg-blue-50 p-4 rounded">
                 <p className="text-sm text-gray-600 mb-1">Mean</p>
                 <p className="text-xl font-bold text-blue-600">{formatCurrency(results.mean)}</p>
@@ -444,7 +432,7 @@ const MonteCarloTrading: React.FC = () => {
           </div>
 
           {/* Chart */}
-          <div className="bg-white rounded-lg shadow p-6 card mc-card mc-chart">
+          <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-xl font-semibold mb-4">Portfolio Growth Paths</h2>
             <ResponsiveContainer width="100%" height={400}>
               <LineChart data={results.chartData}>
@@ -458,7 +446,7 @@ const MonteCarloTrading: React.FC = () => {
                   tickFormatter={(value: number) => `$${(value / 1000).toFixed(0)}k`}
                 />
                 <Tooltip 
-                  formatter={(value: number) => formatCurrency(Number(value))}
+                  formatter={(value: number | string) => formatCurrency(Number(value))}
                   labelFormatter={(label: number | string) => `Month ${label}`}
                 />
                 <Legend />
@@ -472,7 +460,7 @@ const MonteCarloTrading: React.FC = () => {
           </div>
 
           {/* Key Insights */}
-          <div className="bg-white rounded-lg shadow p-6 mt-6 card mc-card mc-keyinsights">
+          <div className="bg-white rounded-lg shadow p-6 mt-6">
             <h2 className="text-xl font-semibold mb-4">Key Insights</h2>
             <div className="space-y-2 text-gray-700">
               <p>• <strong>Risk Management:</strong> You risk {params.riskPercentage}% of capital per trade (starting at {formatCurrency(initialRisk)}), capped at {formatCurrency(params.riskCapDollars)}</p>
