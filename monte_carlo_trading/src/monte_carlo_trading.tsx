@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import type { SimulationResult, Params as WorkerParams, WorkerRequest, WorkerResponse, FinalsResponse, PathsResponse } from './simulationWorker';
+import type { Params as WorkerParams, WorkerRequest, WorkerResponse, FinalsResponse, PathsResponse } from './simulationWorker';
 
 // Vite-friendly worker loader
 const createSimulationWorker = () => new Worker(new URL('./simulationWorker.ts', import.meta.url), { type: 'module' });
