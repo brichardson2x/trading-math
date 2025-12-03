@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import type { Params as WorkerParams, WorkerRequest, WorkerResponse, FinalsResponse, PathsResponse } from './simulationWorker';
+import RrrCalculator from './rrr_calculator';
 
 // Vite-friendly worker loader
 const createSimulationWorker = () => new Worker(new URL('./simulationWorker.ts', import.meta.url), { type: 'module' });
@@ -593,8 +594,13 @@ const MonteCarloTrading: React.FC = () => {
               <p>• The cap at {formatCurrency(params.riskCapDollars)} {initialRisk >= params.riskCapDollars ? 'is active from the start' : `will activate when capital reaches ${formatCurrency(params.riskCapDollars / (params.riskPercentage / 100))}`}</p>
             </div>
           </div>
-        </>
+          </>
       ) : null}
+
+        {/* RRR Calculator (placed under the Monte Carlo output) */}
+        <div className="mt-6">
+          <RrrCalculator />
+        </div>
     </div>
   );
 };
