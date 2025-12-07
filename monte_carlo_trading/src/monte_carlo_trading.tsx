@@ -47,7 +47,10 @@ const MonteCarloTrading: React.FC = () => {
     timeMonths: 36,
     simulations: 10000,
     riskCapDollars: 3000
+    ,
+    compoundingFrequency: 'quarterly'
   });
+
 
   const handleInputChange = (field: keyof ComponentParams, value: string) => {
     setParams(prev => ({
@@ -147,6 +150,7 @@ const MonteCarloTrading: React.FC = () => {
               tradesPerMonth: params.tradesPerMonth,
               timeMonths: params.timeMonths,
               riskCapDollars: params.riskCapDollars,
+                compoundingFrequency: params.compoundingFrequency,
             };
             const req: WorkerRequest = { kind: 'finals', params: wp, simulations: nextSims };
             w.postMessage(req);
@@ -179,6 +183,7 @@ const MonteCarloTrading: React.FC = () => {
             tradesPerMonth: params.tradesPerMonth,
             timeMonths: params.timeMonths,
             riskCapDollars: params.riskCapDollars,
+            compoundingFrequency: params.compoundingFrequency,
           };
           const req: WorkerRequest = { kind: 'finals', params: wp, simulations: firstSims };
           w.postMessage(req);
@@ -219,11 +224,17 @@ const MonteCarloTrading: React.FC = () => {
       let bestCapital = params.initialCapital;
       let bestRisk = Math.min(bestCapital * riskPercentDecimal, params.riskCapDollars);
       let bestReward = bestRisk * params.riskRewardRatio;
+      const freq = params.compoundingFrequency ?? 'quarterly';
+      const recalcMonths = freq === 'daily' ? 0 : freq === 'monthly' ? 1 : freq === 'quarterly' ? 3 : 12;
       for (let month = 1; month <= params.timeMonths; month++) {
         for (let trade = 0; trade < params.tradesPerMonth; trade++) {
           bestCapital += bestReward;
+          if (recalcMonths === 0) {
+            bestRisk = Math.min(bestCapital * riskPercentDecimal, params.riskCapDollars);
+            bestReward = bestRisk * params.riskRewardRatio;
+          }
         }
-        if (month % 3 === 0) {
+        if (recalcMonths > 0 && month % recalcMonths === 0) {
           bestRisk = Math.min(bestCapital * riskPercentDecimal, params.riskCapDollars);
           bestReward = bestRisk * params.riskRewardRatio;
         }
@@ -234,8 +245,11 @@ const MonteCarloTrading: React.FC = () => {
         for (let trade = 0; trade < params.tradesPerMonth; trade++) {
           worstCapitalCalc -= worstRisk;
           if (worstCapitalCalc < 0) worstCapitalCalc = 0;
+          if (recalcMonths === 0 && worstCapitalCalc > 0) {
+            worstRisk = Math.min(worstCapitalCalc * riskPercentDecimal, params.riskCapDollars);
+          }
         }
-        if (month % 3 === 0 && worstCapitalCalc > 0) {
+        if (recalcMonths > 0 && month % recalcMonths === 0 && worstCapitalCalc > 0) {
           worstRisk = Math.min(worstCapitalCalc * riskPercentDecimal, params.riskCapDollars);
         }
       }
@@ -275,6 +289,7 @@ const MonteCarloTrading: React.FC = () => {
         tradesPerMonth: params.tradesPerMonth,
         timeMonths: params.timeMonths,
         riskCapDollars: params.riskCapDollars,
+        compoundingFrequency: params.compoundingFrequency,
       };
       // Use a smaller count for paths to minimize cost
       const sims = Math.min(1000, params.simulations);
@@ -387,6 +402,56 @@ const MonteCarloTrading: React.FC = () => {
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <p className="text-xs text-gray-500 mt-1">For every $1 risked, how much do you aim to make?</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Compounding frequency</label>
+              <div className="flex gap-3">
+                <label className="inline-flex items-center text-sm">
+                  <input
+                    type="radio"
+                    name="compFreq"
+                    value="daily"
+                    checked={params.compoundingFrequency === 'daily'}
+                    onChange={() => setParams(prev => ({ ...prev, compoundingFrequency: 'daily' }))}
+                    className="form-radio"
+                  />
+                  <span className="ml-2">Daily</span>
+                </label>
+                <label className="inline-flex items-center text-sm">
+                  <input
+                    type="radio"
+                    name="compFreq"
+                    value="monthly"
+                    checked={params.compoundingFrequency === 'monthly'}
+                    onChange={() => setParams(prev => ({ ...prev, compoundingFrequency: 'monthly' }))}
+                    className="form-radio"
+                  />
+                  <span className="ml-2">Monthly</span>
+                </label>
+                <label className="inline-flex items-center text-sm">
+                  <input
+                    type="radio"
+                    name="compFreq"
+                    value="quarterly"
+                    checked={params.compoundingFrequency === 'quarterly'}
+                    onChange={() => setParams(prev => ({ ...prev, compoundingFrequency: 'quarterly' }))}
+                    className="form-radio"
+                  />
+                  <span className="ml-2">Quarterly</span>
+                </label>
+                <label className="inline-flex items-center text-sm">
+                  <input
+                    type="radio"
+                    name="compFreq"
+                    value="yearly"
+                    checked={params.compoundingFrequency === 'yearly'}
+                    onChange={() => setParams(prev => ({ ...prev, compoundingFrequency: 'yearly' }))}
+                    className="form-radio"
+                  />
+                  <span className="ml-2">Yearly</span>
+                </label>
+              </div>
             </div>
             
             <div>

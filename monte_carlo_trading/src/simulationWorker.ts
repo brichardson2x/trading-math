@@ -9,6 +9,7 @@ export type Params = {
   tradesPerMonth: number;
   timeMonths: number;
   riskCapDollars: number;
+  compoundingFrequency?: 'daily' | 'monthly' | 'quarterly' | 'yearly';
 };
 
 type MonthlyPoint = { month: number; capital: number };
@@ -45,6 +46,10 @@ function runChunk(params: Params, simulations: number): SimulationResult[] {
     let currentRiskPerTrade: number = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
     let currentRewardPerTrade: number = currentRiskPerTrade * params.riskRewardRatio;
 
+    // determine recalc interval in months (0 means recalc every trade)
+    const freq = params.compoundingFrequency ?? 'quarterly';
+    const recalcMonths = freq === 'daily' ? 0 : freq === 'monthly' ? 1 : freq === 'quarterly' ? 3 : 12;
+
     for (let month = 1; month <= params.timeMonths; month++) {
       for (let trade = 0; trade < params.tradesPerMonth; trade++) {
         const isWin = Math.random() < winRateDecimal;
@@ -54,10 +59,16 @@ function runChunk(params: Params, simulations: number): SimulationResult[] {
           capital -= currentRiskPerTrade;
         }
         if (capital < 0) capital = 0;
+
+        // If daily compounding (recalc every trade), update after each trade
+        if (recalcMonths === 0) {
+          currentRiskPerTrade = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
+          currentRewardPerTrade = currentRiskPerTrade * params.riskRewardRatio;
+        }
       }
 
-      // Reassess risk quarterly
-      if (month % 3 === 0) {
+      // Reassess risk depending on selected frequency
+      if (recalcMonths > 0 && month % recalcMonths === 0) {
         currentRiskPerTrade = Math.min(capital * riskPercentDecimal, params.riskCapDollars);
         currentRewardPerTrade = currentRiskPerTrade * params.riskRewardRatio;
       }
